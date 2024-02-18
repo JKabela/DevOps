@@ -1,0 +1,101 @@
+- hosts: k3s_1st_master_install
+  gather_facts: true
+  remote_user: root
+  become: yes
+
+
+  tasks:
+  - name: Install first K3S master node
+    shell: curl -sfL https://get.k3s.io | sh -s - server --cluster-init --disable servicelb
+    args:
+      executable: /bin/bash
+  - name: test
+    shell: cat "/var/lib/rancher/k3s/server/token"
+    register: token
+
+
+- hosts: k3s_master_install
+  gather_facts: true
+  remote_user: root
+  become: yes
+
+  tasks:
+
+  - name: Join K3S node to cluster
+    shell: curl -sfL https://get.k3s.io | K3S_TOKEN={{ hostvars[item].token.stdout }} sh -s - server --server https://{{ hostvars[item].ansible_default_ipv4.address }}:6443 --cluster-init --disable servicelb
+    with_items: "{{ groups['k3s_1st_master_install'] }}"
+    args:
+      executable: /bin/bash
+
+- hosts: k3s_1st_master_install
+  gather_facts: true
+  remote_user: root
+  become: yes
+
+  tasks:
+  - name: Instalation Metallb (loadbalancer)
+    shell: "kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml \nsleep 30s\nPOD=$(kubectl get pods -l app=metallb -o jsonpath=\"{.items[0].metadata.name}\" -n metallb-system)\necho $POD\nkubectl wait --for=condition=Ready pod/$POD -n metallb-system\nkubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/metallb/metallb.yaml \n"
+    args:
+      executable: /bin/bash
+
+  - name: Instalation K8s Dashboard
+    shell: "kubectl create namespace kubernetes-dashboard\nkubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/k8s_dashboard/rbac.yaml  \nkubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/k8s_dashboard/manifest.yaml \nkubectl wait --for=condition=complet deployment/traefik -n kube-system\nkubectl -n kube-system patch deployment traefik \\\n--type=json \\\n-p='[{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/args/-\", \"value\": \"--serversTransport.insecureSkipVerify=true\"}]'\nkubectl -n kubernetes-dashboard patch deployment kubernetes-dashboard --type=json -p='[{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/args/-\", \"value\": \"--token-ttl=0\"}]'\n"
+
+    args:
+      executable: /bin/bash
+
+  - name: Token for K8S Dashboard
+    shell: kubectl get secret admin-user -n kubernetes-dashboard -o jsonpath={".data.token"} | base64 -d
+    register: dashboard_token
+  - name: view the token value
+    debug: msg="{{ dashboard_token.stdout }}"
+
+  - name: Instalation Longhorn (Persistent volume)
+    # Install longhorn persistent volume 
+    shell: |
+      kubectl create namespace longhorn-system
+      kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.5.3/deploy/longhorn.yaml
+      kubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/longhorn/manifest.yaml
+      sleep 120
+    args:
+      executable: /bin/bash
+  - name: Install Prometheus
+    # Install prometheus with default NodePort
+    shell: |
+      kubectl create namespace monitoring
+      helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --kubeconfig /etc/rancher/k3s/k3s.yaml
+      helm repo update --kubeconfig /etc/rancher/k3s/k3s.yaml
+      helm install prometheus prometheus-community/prometheus -n monitoring -f https://raw.githubusercontent.com/jartas/DevOps/main/prometheus/values.yaml --kubeconfig /etc/rancher/k3s/k3s.yaml
+    args:
+      executable: /bin/bash
+
+  - name: Install Grafana/Loki
+    # Install /Grafana/Loki including datasource for K3s and dashboard for K3s monitoring with default dashboard
+    shell: |
+      kubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/grafana/configmap.yaml --kubeconfig /etc/rancher/k3s/k3s.yaml
+      helm install loki grafana/loki-stack -n monitoring -f https://raw.githubusercontent.com/jartas/DevOps/main/loki/values.yaml --kubeconfig /etc/rancher/k3s/k3s.yaml
+      kubectl rollout status deploy/loki-grafana -n monitoring
+      kubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/loki/deployment.yaml --kubeconfig /etc/rancher/k3s/k3s.yaml
+
+    args:
+      executable: /bin/bash
+
+  - name: Password for Grafana admin account
+    shell: kubectl get secret loki-grafana -n monitoring -o jsonpath={".data.admin-password"} | base64 -d
+    register: password
+  - name: View password for admin account for http://164.92.188.100:30551
+    debug: msg="{{ password.stdout }}"
+
+  - name: Install Jenkins
+    shell: |
+      kubectl create namespace jenkins
+      kubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/App/jenkins/ --kubeconfig /etc/rancher/k3s/k3s.yaml -n jenkins -R
+      kubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/App/jenkins/jenkins-deployment.yaml --kubeconfig /etc/rancher/k3s/k3s.yaml -n jenkins
+      kubectl apply -f https://raw.githubusercontent.com/jartas/DevOps/main/App/jenkins/jenkins-service.yaml --kubeconfig /etc/rancher/k3s/k3s.yaml -n jenkins
+    args:
+      executable: /bin/bash
+
+
+
+
+
